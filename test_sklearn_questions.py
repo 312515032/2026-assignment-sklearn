@@ -4,124 +4,158 @@
 import pytest
 import numpy as np
 import pandas as pd
-from numpy.testing import assert_array_equal
 
-from sklearn.utils.estimator_checks import check_estimator
-from sklearn.model_selection import train_test_split
-from sklearn.utils import shuffle
-from sklearn.datasets import make_classification
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import roc_auc_score
 
-from sklearn_questions import KNearestNeighbors
-from sklearn_questions import MonthlySplit
+from sklearn_questions import get_estimator
+from sklearn_questions import RegistrationSplit
 
-
-@pytest.mark.parametrize("k", [1, 3, 5, 7])
-def test_one_nearest_neighbor_match_sklearn(k):
-    X, y = make_classification(n_samples=200, n_features=20,
-                               random_state=42)
-    X_train, X_test, y_train, y_test = \
-        train_test_split(X, y, random_state=42)
-    knn = KNeighborsClassifier(n_neighbors=k)
-    y_pred_sk = knn.fit(X_train, y_train).predict(X_test)
-
-    onn = KNearestNeighbors(k)
-    y_pred_me = onn.fit(X_train, y_train).predict(X_test)
-    assert_array_equal(y_pred_me, y_pred_sk)
-
-    assert onn.score(X_test, y_test) == knn.score(X_test, y_test)
+DATA_DIR = "data"
 
 
-@pytest.mark.parametrize("k", [1, 3, 5, 7])
-def test_one_nearest_neighbor_check_estimator(k):
-    check_estimator(KNearestNeighbors(n_neighbors=k))
-
-
-@pytest.mark.parametrize("end_date, expected_splits",
-                         [('2021-01-31', 12), ('2020-12-31', 11)])
-@pytest.mark.parametrize("shuffle_data", [True, False])
-def test_time_split(end_date, expected_splits, shuffle_data):
-
-    date = pd.date_range(start='2020-01-01', end=end_date, freq='D')
-    n_samples = len(date)
-    X = pd.DataFrame(range(n_samples), index=date, columns=['val'])
-    y = pd.DataFrame(
-        np.array([i % 2 for i in range(n_samples)]),
-        index=date
+@pytest.fixture(scope="module")
+def churn_train():
+    """Load the assignment training dataset."""
+    return pd.read_csv(
+        f"{DATA_DIR}/churn_train.csv",
+        parse_dates=["registration_month"],
     )
 
-    if shuffle_data:
-        X, y = shuffle(X, y, random_state=0)
 
-    X_1d = X['val']
-
-    cv = MonthlySplit()
-    cv_repr = "MonthlySplit(time_col='index')"
-
-    # Test if the repr works without any errors
-    assert cv_repr == repr(cv)
-
-    # Test if get_n_splits works correctly
-    assert cv.get_n_splits(X, y) == expected_splits
-
-    # Test if the cross-validator works as expected even if
-    # the data is 1d
-    np.testing.assert_equal(
-        list(cv.split(X, y)), list(cv.split(X_1d, y))
+@pytest.fixture(scope="module")
+def churn_test():
+    """Load the held-out test dataset (cancel_initiated=0 for all users)."""
+    return pd.read_csv(
+        f"{DATA_DIR}/churn_test.csv",
+        parse_dates=["registration_month"],
     )
 
-    # Test that train, test indices returned are integers and
-    # data is correctly ordered
-    for train, test in cv.split(X, y):
-        assert np.asarray(train).dtype.kind == "i"
-        assert np.asarray(test).dtype.kind == "i"
 
-        X_train, X_test = X.iloc[train], X.iloc[test]
-        y_train, y_test = y.iloc[train], y.iloc[test]
-        assert X_train.index.max() < X_test.index.min()
-        assert y_train.index.max() < y_test.index.min()
-        assert X.index.equals(y.index)
+def _split_xy(df):
+    return df.drop(columns="churn"), df["churn"]
 
-    with pytest.raises(ValueError, match='datetime'):
-        cv = MonthlySplit(time_col='val')
+
+# ==================================================================
+# Question 1 — RegistrationSplit
+# ==================================================================
+
+def test_registration_split_repr():
+    """RegistrationSplit repr must match the expected string."""
+    cv = RegistrationSplit()
+    assert repr(cv) == "RegistrationSplit()"
+
+
+def test_registration_split_get_n_splits(churn_train):
+    """get_n_splits should return 3 for the assignment training data."""
+    X = churn_train.drop(columns=["churn"])
+    y = churn_train["churn"]
+    cv = RegistrationSplit()
+    assert cv.get_n_splits(X, y) == 3
+
+
+def test_registration_split_indices_are_integers(churn_train):
+    """Train and test indices must be integer arrays."""
+    X = churn_train.drop(columns=["churn"])
+    y = churn_train["churn"]
+    cv = RegistrationSplit()
+    for train_idx, test_idx in cv.split(X, y):
+        assert np.asarray(train_idx).dtype.kind == "i"
+        assert np.asarray(test_idx).dtype.kind == "i"
+
+
+def test_registration_split_temporal_order(churn_train):
+    """Training users must have registered before test users in every fold."""
+    X = churn_train.drop(columns=["churn"])
+    y = churn_train["churn"]
+    cv = RegistrationSplit()
+    for train_idx, test_idx in cv.split(X, y):
+        X_tr = X.iloc[train_idx]
+        X_te = X.iloc[test_idx]
+        assert (
+            X_tr["registration_month"].max() < X_te["registration_month"].min()
+        ), (
+            "All training users must have registered before any test user."
+        )
+
+
+def test_registration_split_both_classes_present(churn_train):
+    """Every fold must contain churners AND non-churners in both folds."""
+    X = churn_train.drop(columns=["churn"])
+    y = churn_train["churn"]
+    cv = RegistrationSplit()
+    for train_idx, test_idx in cv.split(X, y):
+        y_tr = y.iloc[train_idx]
+        y_te = y.iloc[test_idx]
+        assert y_tr.nunique() == 2, (
+            "Training fold must contain both churners and non-churners."
+        )
+        assert y_te.nunique() == 2, (
+            "Test fold must contain both churners and non-churners."
+        )
+
+
+def test_registration_split_n_splits_consistent(churn_train):
+    """get_n_splits must equal the number of folds produced by split."""
+    X = churn_train.drop(columns=["churn"])
+    y = churn_train["churn"]
+    cv = RegistrationSplit()
+    n_declared = cv.get_n_splits(X, y)
+    n_actual = sum(1 for _ in cv.split(X, y))
+    assert n_declared == n_actual
+
+
+def test_registration_split_non_datetime_raises(churn_train):
+    """A ValueError must be raised if registration_month is not datetime."""
+    X = churn_train.drop(columns=["churn"]).copy()
+    X["registration_month"] = X["registration_month"].astype(str)
+    y = churn_train["churn"]
+    cv = RegistrationSplit()
+    with pytest.raises(ValueError, match="datetime"):
         next(cv.split(X, y))
 
 
-@pytest.mark.parametrize("end_date", ['2021-01-31', '2020-12-31'])
-@pytest.mark.parametrize("shuffle_data", [True, False])
-def test_time_split_on_column(end_date, shuffle_data):
+# ==================================================================
+# Question 2 — get_estimator
+# ==================================================================
 
-    date = pd.date_range(
-        start='2020-01-01 00:00', end=end_date, freq='D'
-    )
-    n_samples = len(date)
-    X = pd.DataFrame({'val': range(n_samples), 'date': date})
-    y = pd.DataFrame(
-        np.array([i % 2 for i in range(n_samples)])
+def test_get_estimator_returns_pipeline():
+    """get_estimator() must return a sklearn Pipeline."""
+    est = get_estimator()
+    assert isinstance(est, Pipeline), (
+        f"get_estimator() should return a Pipeline, got {type(est)}"
     )
 
-    if shuffle_data:
-        X, y = shuffle(X, y, random_state=0)
 
-    cv = MonthlySplit(time_col='date')
+def test_get_estimator_has_column_transformer():
+    """The pipeline must contain a ColumnTransformer step."""
+    est = get_estimator()
+    steps_types = [type(step) for _, step in est.steps]
+    assert ColumnTransformer in steps_types, (
+        "The pipeline must include a ColumnTransformer step to handle "
+        "categorical and numerical features separately."
+    )
 
-    # Test that train, test indices returned are integers and
-    # data is correctly ordered
-    n_splits = 0
-    last_time = None
-    for train, test in cv.split(X, y):
 
-        X_train, X_test = X.iloc[train], X.iloc[test]
-        assert X_train['date'].max() < X_test['date'].min()
-        assert X_train['date'].dt.month.nunique() == 1
-        assert X_test['date'].dt.month.nunique() == 1
-        assert X_train['date'].dt.year.nunique() == 1
-        assert X_test['date'].dt.year.nunique() == 1
-        if last_time is not None:
-            assert X_test['date'].min() > last_time
-        last_time = X_test['date'].max()
-        n_splits += 1
+def test_get_estimator_performance(churn_train, churn_test):
+    """Pipeline must achieve ROC-AUC >= 0.72 on the held-out test set.
 
-    assert 'idx' not in X.columns
+    A naive pipeline that relies on all columns will see CV AUC close to 1.0
+    on the training data — which should strike you as suspicious —
+    then score noticeably lower here.
+    """
+    X_train, y_train = _split_xy(churn_train)
+    X_test, y_test = _split_xy(churn_test)
 
-    assert n_splits == cv.get_n_splits(X, y)
+    est = get_estimator()
+    est.fit(X_train, y_train)
+
+    y_proba = est.predict_proba(X_test)[:, 1]
+    auc = roc_auc_score(y_test, y_proba)
+    print(f"\nTest ROC-AUC: {auc:.4f}")
+    assert auc >= 0.72, (
+        f"Expected ROC-AUC >= 0.72 on held-out test set, got {auc:.3f}. "
+        "Hint: if your CV score on test was suspiciously high, check whether "
+        "all features are truly available at prediction time."
+    )

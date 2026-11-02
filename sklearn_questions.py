@@ -1,172 +1,146 @@
-"""Assignment - making a sklearn estimator and cv splitter.
+"""Assignment - a sklearn Pipeline and CV splitter for churn prediction.
 
-The goal of this assignment is to implement by yourself:
+Context
+-------
+You are working with event-log data from a music streaming platform. Each row
+in the raw log is one user action (page visited, song played, ...). The goal
+is to predict which users will cancel their subscription (churn).
 
-- a scikit-learn estimator for the KNearestNeighbors for classification
-  tasks and check that it is working properly.
-- a scikit-learn CV splitter where the splits are based on a Pandas
-  DateTimeIndex.
+The file ``data/churn_train.csv`` contains one row per user with aggregated
+features derived from the raw log:
 
-Detailed instructions for question 1:
-The nearest neighbor classifier predicts for a point X_i the target y_k of
-the training sample X_k which is the closest to X_i. We measure proximity with
-the Euclidean distance. The model will be evaluated with the accuracy (average
-number of samples corectly classified). You need to implement the `fit`,
-`predict` and `score` methods for this class. The code you write should pass
-the test we implemented. You can run the tests by calling at the root of the
-repo `pytest test_sklearn_questions.py`. Note that to be fully valid, a
-scikit-learn estimator needs to check that the input given to `fit` and
-`predict` are correct using the `validate_data, check_is_fitted` functions
-imported in this file.
-You can find more information on how they should be used in the following doc:
-https://scikit-learn.org/stable/developers/develop.html#rolling-your-own-estimator.
-Make sure to use them to pass `test_nearest_neighbor_check_estimator`.
++-------------------+--------------------------------------------+
+| Column            | Description                                |
++===================+============================================+
+| user_id           | Unique user identifier                     |
++-------------------+--------------------------------------------+
+| gender            | M / F (categorical)                        |
++-------------------+--------------------------------------------+
+| level             | Subscription tier: "free" / "paid"         |
++-------------------+--------------------------------------------+
+| total_events      | log(1 + total number of events)            |
++-------------------+--------------------------------------------+
+| rate_songs        | Fraction of events that are song plays     |
++-------------------+--------------------------------------------+
+| rate_thumbs_up    | Fraction of events that are Thumbs-Up      |
++-------------------+--------------------------------------------+
+| rate_thumbs_down  | Fraction of events that are Thumbs-Down    |
++-------------------+--------------------------------------------+
+| rate_errors       | Fraction of events that are errors         |
++-------------------+--------------------------------------------+
+| n_sessions        | Number of distinct sessions                |
++-------------------+--------------------------------------------+
+| has_downgraded    | 1 if user ever requested a downgrade       |
++-------------------+--------------------------------------------+
+| cancel_initiated  | 1 if user visited the cancellation page    |
++-------------------+--------------------------------------------+
+| registration_month| Month the user registered (datetime)      |
++-------------------+--------------------------------------------+
+| churn             | Target: 1 = churned, 0 = retained          |
++-------------------+--------------------------------------------+
 
+Question 1 - RegistrationSplit
+-------------------------------
+Implement ``RegistrationSplit``, a scikit-learn cross-validator that splits
+users by their ``registration_month`` column.
 
-Detailed instructions for question 2:
-The data to split should contain the index or one column in
-datatime format. Then the aim is to split the data between train and test
-sets when for each pair of successive months, we learn on the first and
-predict of the following. For example if you have data distributed from
-november 2020 to march 2021, you have have 4 splits. The first split
-will allow to learn on november data and predict on december data, the
-second split to learn december and predict on january etc.
+Each fold trains on users who registered in month M and evaluates on users
+who registered in month M+1, simulating the production setting: you train on
+your existing user base and predict on the cohort that joined next.
 
-We also ask you to respect the pep8 convention: https://pep8.org. This will be
-enforced with `flake8`. You can check that there is no flake8 errors by
-calling `flake8` at the root of the repo.
+Only folds where *both* the training set and the test set contain at least one
+churner and one non-churner are generated (otherwise the fold is useless for
+evaluating churn prediction).
+
+We also ask you to respect the PEP 8 convention: https://pep8.org. This will
+be enforced with ``ruff``. You can check that there are no errors by calling
+``ruff check`` at the root of the repo.
 
 Finally, you need to write docstrings for the methods you code and for the
-class. The docstring will be checked using `pydocstyle` that you can also
-call at the root of the repo.
+class.
+
+
+Question 2 - get_estimator
+--------------------------
+Implement ``get_estimator()`` so that it returns a scikit-learn ``Pipeline``
+that can be trained on the feature columns of ``churn_train.csv`` and predict
+churn on unseen users.
+
+Requirements:
+- The pipeline must contain a ``ColumnTransformer`` that handles categorical
+  columns (``gender``, ``level``) and numerical columns separately.
+- Handle missing values in numerical features (``rate_errors`` contains NaN).
+- End with a classifier of your choice.
+- Achieve a ROC-AUC of at least 0.72 on the held-out test set.
+
+Important: not every column should necessarily be used as a feature.
+Think carefully about which columns are truly available at prediction time.
 
 Hints
 -----
-- You can use the function:
+- Q1 - ``pd.Series.dt.to_period('M')`` converts datetimes to year-month
+  periods that are easy to sort and compare.
 
-from sklearn.metrics.pairwise import pairwise_distances
+- Q1 - Remember to validate that ``registration_month`` is of datetime dtype
+  and raise a ``ValueError`` if not.
 
-to compute distances between 2 sets of samples.
+- Q2 - Use ``sklearn.compose.ColumnTransformer`` together with
+  ``sklearn.preprocessing.OneHotEncoder`` (for categoricals) and
+  ``sklearn.impute.SimpleImputer`` (for numericals with NaN).
+
+- Q2 - Explore the data first with ``pandas`` before writing the pipeline.
+  Any feature that might be problematic/too correlated with the data?
 """
-import numpy as np
 import pandas as pd
-
-from sklearn.base import BaseEstimator
-from sklearn.base import ClassifierMixin
 
 from sklearn.model_selection import BaseCrossValidator
 
-from sklearn.utils.validation import check_is_fitted
-from sklearn.utils.validation import validate_data
-from sklearn.metrics.pairwise import pairwise_distances
 
+# ============================================================
+# Question 1
+# ============================================================
 
-class KNearestNeighbors(ClassifierMixin, BaseEstimator):
-    """KNearestNeighbors classifier."""
+class RegistrationSplit(BaseCrossValidator):
+    """Cross-validator that splits users by registration month.
 
-    def __init__(self, n_neighbors=1):  # noqa: D107
-        self.n_neighbors = n_neighbors
+    Expects the input DataFrame to contain a ``registration_month`` column of
+    datetime dtype.  Each fold trains on users who registered in month M and
+    evaluates on users who registered in the following month M+1.
 
-    def fit(self, X, y):
-        """Fitting function.
-
-        Parameters
-        ----------
-        X : ndarray, shape (n_samples, n_features)
-            Data to train the model.
-        y : ndarray, shape (n_samples,)
-            Labels associated with the training data.
-
-        Returns
-        -------
-        self : instance of KNearestNeighbors
-            The current instance of the classifier
-        """
-        return self
-
-    def predict(self, X):
-        """Predict function.
-
-        Parameters
-        ----------
-        X : ndarray, shape (n_test_samples, n_features)
-            Data to predict on.
-
-        Returns
-        -------
-        y : ndarray, shape (n_test_samples,)
-            Predicted class labels for each test data sample.
-        """
-        y_pred = np.zeros(X.shape[0])
-        return y_pred
-
-    def score(self, X, y):
-        """Calculate the score of the prediction.
-
-        Parameters
-        ----------
-        X : ndarray, shape (n_samples, n_features)
-            Data to score on.
-        y : ndarray, shape (n_samples,)
-            target values.
-
-        Returns
-        ----------
-        score : float
-            Accuracy of the model computed for the (X, y) pairs.
-        """
-        return 0.
-
-
-class MonthlySplit(BaseCrossValidator):
-    """CrossValidator based on monthly split.
-
-    Split data based on the given `time_col` (or default to index). Each split
-    corresponds to one month of data for the training and the next month of
-    data for the test.
-
-    Parameters
-    ----------
-    time_col : str, defaults to 'index'
-        Column of the input DataFrame that will be used to split the data. This
-        column should be of type datetime. If split is called with a DataFrame
-        for which this column is not a datetime, it will raise a ValueError.
-        To use the index as column just set `time_col` to `'index'`.
+    Only folds where both the training set and the test set contain at least
+    one churner **and** one non-churner are generated.
     """
 
-    def __init__(self, time_col='index'):  # noqa: D107
-        self.time_col = time_col
-
     def get_n_splits(self, X, y=None, groups=None):
-        """Return the number of splitting iterations in the cross-validator.
+        """Return the number of valid splitting iterations.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-            Training data, where `n_samples` is the number of samples
-            and `n_features` is the number of features.
-        y : array-like of shape (n_samples,)
-            Always ignored, exists for compatibility.
+            Training data, must contain a ``registration_month`` column.
+        y : array-like of shape (n_samples,), optional
+            Target values.  Used to check that both classes are present.
         groups : array-like of shape (n_samples,)
             Always ignored, exists for compatibility.
 
         Returns
         -------
         n_splits : int
-            The number of splits.
+            The number of valid splits.
         """
-        return 0
+        # Return the number of valid splits - TODO
+        ...
 
     def split(self, X, y, groups=None):
-        """Generate indices to split data into training and test set.
+        """Generate indices to split data into training and test sets.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-            Training data, where `n_samples` is the number of samples
-            and `n_features` is the number of features.
+            Training data, must contain a ``registration_month`` column.
         y : array-like of shape (n_samples,)
-            Always ignored, exists for compatibility.
+            Target values.  Used to filter out folds that do not contain
+            both classes.
         groups : array-like of shape (n_samples,)
             Always ignored, exists for compatibility.
 
@@ -177,12 +151,61 @@ class MonthlySplit(BaseCrossValidator):
         idx_test : ndarray
             The testing set indices for that split.
         """
+        # Split into monthly registration folds - TODO
+        ...
 
-        n_samples = X.shape[0]
-        n_splits = self.get_n_splits(X, y, groups)
-        for i in range(n_splits):
-            idx_train = range(n_samples)
-            idx_test = range(n_samples)
-            yield (
-                idx_train, idx_test
-            )
+
+# ============================================================
+# Question 2
+# ============================================================
+
+def get_estimator():
+    """Return a scikit-learn Pipeline for churn prediction.
+
+    The pipeline is trained on the feature columns of ``churn_train.csv``
+    (all columns except ``user_id``, ``registration_month``, and ``churn``).
+
+    Returns
+    -------
+    estimator : sklearn.pipeline.Pipeline
+        An unfitted pipeline ready to be used with ``fit`` / ``predict``.
+    """
+    # TODO
+    ...
+
+
+# ============================================================
+# Script to test the objects implemented in this file.
+# ============================================================
+
+if __name__ == "__main__":
+    from sklearn.model_selection import cross_validate
+
+    train = pd.read_csv(
+        "data/churn_train.csv", parse_dates=["registration_month"]
+    )
+    # Pass the full DataFrame (including registration_month) to the splitter.
+    X = train.drop(columns=["churn"])
+    y = train["churn"]
+
+    # ---- inspect the folds produced by RegistrationSplit ----
+    print("\n=== RegistrationSplit folds ===")
+    cv = RegistrationSplit()
+    for i, (tr, te) in enumerate(cv.split(X, y)):
+        m_tr = train.iloc[tr]["registration_month"].dt.to_period("M").unique()
+        m_te = train.iloc[te]["registration_month"].dt.to_period("M").unique()
+        churn_tr = y.iloc[tr].mean()
+        churn_te = y.iloc[te].mean()
+        print(
+            f"Fold {i}: train={sorted(m_tr)} "
+            f"(n={len(tr)}, churn={churn_tr:.1%})"
+            f"  →  test={sorted(m_te)} "
+            f"(n={len(te)}, churn={churn_te:.1%})"
+        )
+
+    # ---- cross-validate the estimator ----
+    print("\n=== Cross-validation with RegistrationSplit ===")
+    scores = cross_validate(get_estimator(), X, y, cv=cv, scoring="roc_auc")
+    scores = pd.DataFrame(scores)
+    print(f"CV results : {scores.round(3)}")
+    print(f"Mean CV AUC   : {scores['test_score'].mean():.3f}")
